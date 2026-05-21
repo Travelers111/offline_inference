@@ -1,0 +1,65 @@
+{
+  "episode_name": "episode_000001",
+  "episode_index": 1,
+  "episode_len": 494,
+  "task": "Grab the scraper and remove the tape stuck on the table.",
+  "dataset_tasks": [
+    "Grab the scraper and remove the tape stuck on the table."
+  ],
+  "cameras": [
+    "observation.images.cam_hand",
+    "observation.images.cam_top"
+  ],
+  "chunk_size": 50,
+  "action_dim": 10,
+  "action_names": [
+    "x",
+    "y",
+    "z",
+    "rot6d_row0_x",
+    "rot6d_row0_y",
+    "rot6d_row0_z",
+    "rot6d_row1_x",
+    "rot6d_row1_y",
+    "rot6d_row1_z",
+    "gripper"
+  ],
+  "metrics": {
+    "first_step": {
+      "mse": 99.45091247558594,
+      "mae": 3.07820725440979,
+      "per_dim_mse": [
+        0.00044382610940374434,
+        0.0012995257275179029,
+        0.009036408737301826,
+        3.1614856719970703,
+        0.4135170876979828,
+        0.12149403244256973,
+        0.21041542291641235,
+        0.23509299755096436,
+        0.8063001036643982,
+        989.5497436523438
+      ],
+      "max_error": 50.20106506347656,
+      "smoothness": 0.8445397615432739
+    },
+    "valid_chunk": {
+      "mse": 109.07649993896484,
+      "mae": 3.1952521800994873,
+      "per_dim_mse": [
+        0.011582506820559502,
+        0.002375601092353463,
+        0.012410804629325867,
+        3.2489988803863525,
+        0.37166422605514526,
+        0.11227097362279892,
+        0.18146559596061707,
+        0.21983212232589722,
+        0.8339458703994751,
+        1085.7735595703125
+      ],
+      "max_error": 54.65915298461914,
+      "smoothness": 1.0613340139389038
+    }
+  }
+}

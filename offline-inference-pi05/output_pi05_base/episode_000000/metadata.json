@@ -1,0 +1,65 @@
+{
+  "episode_name": "episode_000000",
+  "episode_index": 0,
+  "episode_len": 475,
+  "task": "Pick up the scraper and scrape off the tape from the table surface.",
+  "dataset_tasks": [
+    "Pick up the scraper and scrape off the tape from the table surface."
+  ],
+  "cameras": [
+    "observation.images.cam_hand",
+    "observation.images.cam_top"
+  ],
+  "chunk_size": 50,
+  "action_dim": 10,
+  "action_names": [
+    "x",
+    "y",
+    "z",
+    "rot6d_row0_x",
+    "rot6d_row0_y",
+    "rot6d_row0_z",
+    "rot6d_row1_x",
+    "rot6d_row1_y",
+    "rot6d_row1_z",
+    "gripper"
+  ],
+  "metrics": {
+    "first_step": {
+      "mse": 91.8866195678711,
+      "mae": 2.9832043647766113,
+      "per_dim_mse": [
+        0.0006812268984504044,
+        0.0014626383781433105,
+        0.008953182026743889,
+        3.210026264190674,
+        0.4193227291107178,
+        0.12450233101844788,
+        0.24513554573059082,
+        0.17672310769557953,
+        0.9029774069786072,
+        913.7767333984375
+      ],
+      "max_error": 46.15690612792969,
+      "smoothness": 0.8609613180160522
+    },
+    "valid_chunk": {
+      "mse": 103.23262023925781,
+      "mae": 3.0912532806396484,
+      "per_dim_mse": [
+        0.010995210148394108,
+        0.002820890164002776,
+        0.012769607827067375,
+        3.233316421508789,
+        0.3754987120628357,
+        0.12592296302318573,
+        0.24729745090007782,
+        0.17942111194133759,
+        0.9153341054916382,
+        1027.2178955078125
+      ],
+      "max_error": 56.4600715637207,
+      "smoothness": 1.001599669456482
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "episode_name": "episode_000002",
+  "episode_index": 2,
+  "episode_len": 785,
+  "task": "Use the scraper to peel off the tape on the table.",
+  "dataset_tasks": [
+    "Use the scraper to peel off the tape on the table."
+  ],
+  "cameras": [
+    "observation.images.cam_hand",
+    "observation.images.cam_top"
+  ],
+  "chunk_size": 50,
+  "action_dim": 10,
+  "action_names": [
+    "x",
+    "y",
+    "z",
+    "rot6d_row0_x",
+    "rot6d_row0_y",
+    "rot6d_row0_z",
+    "rot6d_row1_x",
+    "rot6d_row1_y",
+    "rot6d_row1_z",
+    "gripper"
+  ],
+  "metrics": {
+    "first_step": {
+      "mse": 103.08489227294922,
+      "mae": 3.1722934246063232,
+      "per_dim_mse": [
+        0.0007493997109122574,
+        0.0027963388711214066,
+        0.007715648505836725,
+        3.1588802337646484,
+        0.38422858715057373,
+        0.16507162153720856,
+        0.22040076553821564,
+        0.14369718730449677,
+        0.4986421465873718,
+        1026.266845703125
+      ],
+      "max_error": 47.47626495361328,
+      "smoothness": 0.6478713750839233
+    },
+    "valid_chunk": {
+      "mse": 111.85128784179688,
+      "mae": 3.2335944175720215,
+      "per_dim_mse": [
+        0.007219257764518261,
+        0.0036287885159254074,
+        0.011842784471809864,
+        3.2432031631469727,
+        0.3476365804672241,
+        0.14007361233234406,
+        0.192962184548378,
+        0.11990924179553986,
+        0.482923299074173,
+        1113.9666748046875
+      ],
+      "max_error": 55.011451721191406,
+      "smoothness": 0.9674531817436218
+    }
+  }
+}

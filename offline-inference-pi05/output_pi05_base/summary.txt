@@ -1,0 +1,18 @@
+LEROBOT PI0.5 OFFLINE INFERENCE SUMMARY
+============================================================
+Checkpoint: /home/eai/PI/lerobot/models/pi05_base
+Dataset root: /home/eai/PI/data/clean_test_lerobot_pi05
+Processor source: dataset-config
+Episodes: 5
+
+Average first-step MSE: 95.53471527
+Average first-step MAE: 2.99648499
+Average valid-chunk MSE: 105.20001984
+Average valid-chunk MAE: 3.08195715
+
+Per episode:
+  episode_000000: first_step_mse=91.88661957, first_step_mae=2.98320436, valid_chunk_mse=103.23262024, valid_chunk_mae=3.09125328
+  episode_000001: first_step_mse=99.45091248, first_step_mae=3.07820725, valid_chunk_mse=109.07649994, valid_chunk_mae=3.19525218
+  episode_000002: first_step_mse=103.08489227, first_step_mae=3.17229342, valid_chunk_mse=111.85128784, valid_chunk_mae=3.23359442
+  episode_000003: first_step_mse=95.29790497, first_step_mae=2.96156383, valid_chunk_mse=101.60509491, valid_chunk_mae=2.97646523
+  episode_000004: first_step_mse=87.95324707, first_step_mae=2.78715611, valid_chunk_mse=100.23459625, valid_chunk_mae=2.91322064
