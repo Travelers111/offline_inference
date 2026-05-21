@@ -40,6 +40,18 @@ Pi0 模型输出未来 50 步 action chunk
 
 这里最重要的工程目标是：**让每一个输入 state、模型输出、ground truth、图像帧、误差指标都能追溯到同一个 timestep。**
 
+
+### **1.2离线推理展示：**
+
+##### 1.2.1 3Dxyz位姿预测与groundtruth图
+
+![1779367324117](image/README/1779367324117.png)
+
+
+##### 1.2.2  10Daction预测与groundtruth波形图
+
+![1779367434939](image/README/1779367434939.png)
+
 ## 2. 设计目标
 
 项目设计时主要围绕以下几个目标：
@@ -1210,40 +1222,28 @@ action_dim 必须是 10 的整数倍
 
 1. **checkpoint 自描述解析**
    从 checkpoint 自动恢复 camera、action mode、state mode、action dim、chunk size。
-
 2. **严格训练布局输入**
    默认要求 HDF5 已有 `/observations/qpos` 和 `/action`，避免评估时重做预处理。
-
 3. **checkpoint stats 归一化**
    只使用 checkpoint 对应的 `dataset_stats.pkl`，不使用评估数据统计量。
-
 4. **state_mode 与训练输入对齐**
    支持 `absolute`、`zero_pose_gripper` 和旧别名 `zero_pose_keep_gripper`。zero-pose 模式只清零 xyz/rot6d，保留 gripper。
-
 5. **SE3 delta 构造**
    使用 `inv(T_qpos[t]) @ T_action[t+k]`，不是简单相减。
-
 6. **pose block 抽象**
    以 10D block 统一单手和双手。
-
 7. **每 state 独立预测 50 步**
    每个 timestep 都形成一个独立 pair，不做闭环 rollout。
-
 8. **delta-to-absolute reconstruction**
    为 delta 模型额外生成 absolute 曲线，便于观察真实空间轨迹。
-
 9. **中间结果可复用**
    `trajectory_pairs.pkl` 连接推理、指标和所有可视化。
-
 10. **HDF5 图像延迟读取**
     可视化按需从原始 HDF5 读取模型使用的当前帧相机图像，不膨胀输出目录。
-
 11. **3D + waveform 双视角诊断**
     3D 看空间轨迹，waveform 看维度级数值行为。
-
 12. **交互事件防积压**
     长按键盘使用内部 timer，不依赖系统重复 keypress，不在 key 回调里 `flush_events()`。
-
 13. **alignment 验证**
     用独立脚本确认离线 GT 和训练 GT 数学定义一致。
 
