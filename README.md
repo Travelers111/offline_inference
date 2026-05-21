@@ -1,10 +1,11 @@
-# offline-inference-easy-mirro 项目技术实现说明
+# offline-inference  离线推理项目说明
 
 更新时间：2026-05-20
 
 这份文档不是使用手册，而是从工程实现角度说明 `offline-inference-easy-mirro` 这个项目是怎么被做出来的：它的核心技术逻辑、数据流、关键处理、内部中间状态、SE3 action 构造、checkpoint 对齐、以及 3D/波形/HDF5 图像可视化是如何串起来的。
 
 如果要看怎么运行命令、怎么指定 checkpoint、怎么生成图，请看 `离线推理readme.md`。本文重点解释项目本身的技术设计。
+（easy-mirro为pi0版本，  pi05为lerobot版的pi05版本，输出支持相对输出和绝对输出的比较与展示）
 
 ## 1. 项目本质
 
