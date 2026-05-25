@@ -17,9 +17,10 @@ if "--no-show" in sys.argv or not os.environ.get("DISPLAY"):
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.gridspec import GridSpec
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Button, Slider
 
 from lerobot_frame_source import EpisodeImageSource
+from viz_run_info import load_episode_metadata, load_run_info, merge_episode_info, short_run_title
 
 
 SPACE_KEYS = {
@@ -29,6 +30,8 @@ SPACE_KEYS = {
 POSE_BLOCK_SIZE = 10
 DEFAULT_POSITION_SCALE = 10.0
 DEFAULT_POSITION_UNIT = "dm"
+DEFAULT_PLAY_INTERVAL_MS = 40
+KEY_RELEASE_GRACE_MS = 60
 
 
 def pose_block_offsets(action_dim: int) -> list[int]:
@@ -99,15 +102,18 @@ class PI05TrajectoryVisualizer:
         data_dir: Path,
         episodes: list[str],
         episode_index: int,
+        run_info: dict,
         space: str,
         position_scale: float,
         position_unit: str,
+        play_interval_ms: int,
     ):
         self.trajectory_data = trajectory_data
         self.image_source = image_source
         self.data_dir = data_dir
         self.episodes = episodes
         self.episode_index = episode_index
+        self.run_info = run_info
         self.pairs = trajectory_data["pairs"]
         self.action_dim = int(trajectory_data["action_dim"])
         self.space = resolve_space(trajectory_data, space)
@@ -122,6 +128,13 @@ class PI05TrajectoryVisualizer:
         self.slider = None
         self._slider_updating = False
         self._axis_limits = None
+        self.play_interval_ms = play_interval_ms
+        self._playing = False
+        self._play_timer = None
+        self._key_timer = None
+        self._held_direction = 0
+        self._key_release_timer = None
+        self._pending_release_direction = 0
 
     def axis_limits(self):
         if self._axis_limits is not None:
@@ -153,6 +166,7 @@ class PI05TrajectoryVisualizer:
         with traj_path.open("rb") as f:
             self.trajectory_data = pickle.load(f)
         self.image_source = EpisodeImageSource.from_episode_dir(episode_dir, self.trajectory_data)
+        self.run_info = merge_episode_info(self.run_info, load_episode_metadata(episode_dir))
         self.pairs = self.trajectory_data["pairs"]
         self.action_dim = int(self.trajectory_data["action_dim"])
         self.space = resolve_space(self.trajectory_data, self.space)
@@ -162,61 +176,198 @@ class PI05TrajectoryVisualizer:
         self._axis_limits = None
         return True
 
-    def next_pair(self):
-        if self.current < len(self.pairs) - 1:
-            self.current += 1
-            self.update()
+    def step_by(self, direction: int, force_draw: bool = False):
+        new_index = int(np.clip(self.current + direction, 0, len(self.pairs) - 1))
+        if new_index == self.current:
+            return
+        self.current = new_index
+        self.update(force_draw=force_draw)
 
-    def prev_pair(self):
-        if self.current > 0:
-            self.current -= 1
-            self.update()
+    def next_pair(self, force_draw: bool = False):
+        self.step_by(1, force_draw=force_draw)
+
+    def prev_pair(self, force_draw: bool = False):
+        self.step_by(-1, force_draw=force_draw)
 
     def next_episode(self):
         if self.episode_index < len(self.episodes) - 1:
             self.episode_index += 1
             if self.load_episode(self.episodes[self.episode_index]):
-                self.update()
+                self.update(force_draw=True)
 
     def prev_episode(self):
         if self.episode_index > 0:
             self.episode_index -= 1
             if self.load_episode(self.episodes[self.episode_index]):
-                self.update()
+                self.update(force_draw=True)
 
-    def on_key(self, event):
-        if event.key in {" ", "right"}:
-            self.next_pair()
-        elif event.key == "left":
-            self.prev_pair()
+    def on_key_press(self, event):
+        direction = self._direction_from_key(event.key)
+        if direction:
+            self.stop_playback()
+            self._cancel_pending_key_release()
+            if self._held_direction == direction:
+                return
+            self._held_direction = direction
+            self.step_by(direction, force_draw=True)
+            if self._key_timer is not None:
+                self._key_timer.start()
         elif event.key == "up":
+            self.stop_key_hold()
+            self.stop_playback()
             self.next_episode()
         elif event.key == "down":
+            self.stop_key_hold()
+            self.stop_playback()
             self.prev_episode()
+        elif event.key in {"p", "P"}:
+            self.stop_key_hold()
+            self.toggle_playback()
         elif event.key == "q":
+            self.stop_key_hold()
+            self.stop_playback()
             plt.close(self.fig)
+
+    def on_key_release(self, event):
+        direction = self._direction_from_key(event.key)
+        if direction and direction == self._held_direction:
+            self._schedule_key_release(direction)
+
+    @staticmethod
+    def _direction_from_key(key) -> int:
+        if key in {" ", "space", "right"}:
+            return 1
+        if key == "left":
+            return -1
+        return 0
+
+    def stop_key_hold(self):
+        self._held_direction = 0
+        self._pending_release_direction = 0
+        if self._key_timer is not None:
+            self._key_timer.stop()
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+
+    def _cancel_pending_key_release(self):
+        self._pending_release_direction = 0
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+
+    def _schedule_key_release(self, direction: int):
+        # Tk key auto-repeat can emit release/press pairs while the key is
+        # still physically held. Stop after a short grace window unless another
+        # press for the same direction arrives first.
+        self._pending_release_direction = direction
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+            self._key_release_timer.start()
+
+    def _finish_key_release(self):
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+        if self._pending_release_direction and self._pending_release_direction == self._held_direction:
+            self.stop_key_hold()
+        self._pending_release_direction = 0
+        return True
+
+    def _advance_held_key(self):
+        if not self._held_direction:
+            return True
+        self.step_by(self._held_direction, force_draw=True)
+        return True
+
+    def toggle_playback(self, _event=None):
+        self.stop_key_hold()
+        if self._playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+
+    def start_playback(self):
+        if self._play_timer is None:
+            return
+        self._playing = True
+        if hasattr(self, "play_button"):
+            self.play_button.label.set_text("Pause")
+        self._play_timer.start()
+
+    def stop_playback(self):
+        self._playing = False
+        if self._play_timer is not None:
+            self._play_timer.stop()
+        if hasattr(self, "play_button"):
+            self.play_button.label.set_text("Play")
+
+    def _advance_playback(self):
+        if not self._playing:
+            return True
+        self.current = 0 if self.current >= len(self.pairs) - 1 else self.current + 1
+        self.update(force_draw=True)
+        return True
+
+    def _capture_view(self):
+        if self.ax_traj is None:
+            return None
+        return (
+            getattr(self.ax_traj, "elev", None),
+            getattr(self.ax_traj, "azim", None),
+            getattr(self.ax_traj, "roll", None),
+        )
+
+    def _restore_view(self, view):
+        if self.ax_traj is None or view is None:
+            return
+        elev, azim, roll = view
+        if elev is None or azim is None:
+            return
+        if roll is not None:
+            try:
+                self.ax_traj.view_init(elev=elev, azim=azim, roll=roll)
+                return
+            except TypeError:
+                pass
+        self.ax_traj.view_init(elev=elev, azim=azim)
+
+    def _finish_draw(self, force_draw: bool = False):
+        # Do not call flush_events() from key/timer callbacks. Some GUI
+        # backends recursively process queued key events there during long
+        # holds, which can keep advancing after release.
+        self.fig.canvas.draw_idle()
 
     def on_slider(self, value):
         if self._slider_updating:
             return
         self.current = int(value)
-        self.update()
+        self.stop_key_hold()
+        self.stop_playback()
+        self.update(force_draw=True)
 
     def setup(self):
         image_count = len(self.image_source.available_cameras()) if self.image_source is not None else 0
         rows = max(1, image_count)
         self.fig = plt.figure(figsize=(16, 9))
-        self.fig.subplots_adjust(bottom=0.08)
+        self.fig.subplots_adjust(bottom=0.08, top=0.9)
         gs = GridSpec(rows, 2, width_ratios=[2, 1])
         self.ax_traj = self.fig.add_subplot(gs[:, 0], projection="3d")
         self.image_axes = [self.fig.add_subplot(gs[i, 1]) for i in range(rows)]
         slider_ax = self.fig.add_axes([0.15, 0.015, 0.7, 0.025])
         self.slider = Slider(slider_ax, "Step", 0, max(len(self.pairs) - 1, 1), valinit=0, valstep=1)
         self.slider.on_changed(self.on_slider)
-        self.fig.canvas.mpl_connect("key_press_event", self.on_key)
-        self.update()
+        play_ax = self.fig.add_axes([0.88, 0.01, 0.075, 0.04])
+        self.play_button = Button(play_ax, "Play")
+        self.play_button.on_clicked(self.toggle_playback)
+        self._play_timer = self.fig.canvas.new_timer(interval=self.play_interval_ms)
+        self._play_timer.add_callback(self._advance_playback)
+        self._key_timer = self.fig.canvas.new_timer(interval=self.play_interval_ms)
+        self._key_timer.add_callback(self._advance_held_key)
+        self._key_release_timer = self.fig.canvas.new_timer(interval=KEY_RELEASE_GRACE_MS)
+        self._key_release_timer.add_callback(self._finish_key_release)
+        self.fig.canvas.mpl_connect("key_press_event", self.on_key_press)
+        self.fig.canvas.mpl_connect("key_release_event", self.on_key_release)
+        self.update(force_draw=True)
 
-    def update(self):
+    def update(self, force_draw: bool = False):
         pair = self.pairs[self.current]
         timestep = pair["timestep"]
         gt = display_action(pair[self.gt_key], self.action_dim, self.position_scale)
@@ -224,6 +375,7 @@ class PI05TrajectoryVisualizer:
         valid = pair["valid_length"]
         chunk_size = self.trajectory_data["chunk_size"]
 
+        view = self._capture_view()
         self.ax_traj.clear()
         (xlim, ylim, zlim) = self.axis_limits()
         self.ax_traj.set_xlim(*xlim)
@@ -252,20 +404,20 @@ class PI05TrajectoryVisualizer:
             self.ax_traj.scatter(pred[:valid, off], pred[:valid, off + 1], pred[:valid, off + 2], color="tab:red", s=18)
             self.ax_traj.scatter(*gt[0, off : off + 3], color="tab:blue", marker="^", s=90, edgecolors="black")
             self.ax_traj.scatter(*pred[0, off : off + 3], color="tab:red", marker="x", s=90)
-            gripper_idx = off + POSE_BLOCK_SIZE - 1
-            if gt.shape[1] > gripper_idx and pred.shape[1] > gripper_idx:
-                print(
-                    f"[{self.space} step {timestep:>3}] block={block_idx} "
-                    f"Gripper: GT={gt[0, gripper_idx]:.4f} Pred={pred[0, gripper_idx]:.4f}"
-                )
         self.ax_traj.set_xlabel(f"X ({self.position_unit})")
         self.ax_traj.set_ylabel(f"Y ({self.position_unit})")
         self.ax_traj.set_zlabel(f"Z ({self.position_unit})")
+        try:
+            self.ax_traj.set_box_aspect((1, 1, 1))
+        except Exception:
+            pass
+        self._restore_view(view)
         episode_name = self.episodes[self.episode_index]
+        self.fig.suptitle(short_run_title(self.run_info), fontsize=12, y=0.98)
         self.ax_traj.set_title(
             f"{episode_name}  {self.space}  step {timestep}  pair {self.current + 1}/{len(self.pairs)}  "
             f"valid {valid}/{chunk_size}\n"
-            "Left/Right: step  Up/Down: episode  Q: quit"
+            "SPACE/RIGHT: next  LEFT: prev  P/Button: play-pause  UP/DOWN: episode  Q: quit"
         )
         self.ax_traj.legend(loc="upper left")
 
@@ -289,15 +441,24 @@ class PI05TrajectoryVisualizer:
         self.slider.ax.set_xlim(0, self.slider.valmax)
         self.slider.set_val(self.current)
         self._slider_updating = False
-        self.fig.canvas.draw_idle()
+        self._finish_draw(force_draw=force_draw)
 
-    def run(self):
+    def run(self, no_show: bool = False):
         self.setup()
-        plt.show()
+        try:
+            if no_show:
+                self.fig.canvas.draw()
+                plt.close(self.fig)
+            else:
+                plt.show()
+        finally:
+            self.stop_key_hold()
+            self.stop_playback()
 
 
 def load_start(data_dir: Path, requested_episode: str | None):
     install_numpy_pickle_compat()
+    run_info = load_run_info(data_dir)
     episodes = sorted(
         path.name for path in data_dir.iterdir() if path.is_dir() and (path / "trajectory_pairs.pkl").exists()
     )
@@ -311,7 +472,8 @@ def load_start(data_dir: Path, requested_episode: str | None):
     with (episode_dir / "trajectory_pairs.pkl").open("rb") as f:
         trajectory_data = pickle.load(f)
     image_source = EpisodeImageSource.from_episode_dir(episode_dir, trajectory_data)
-    return trajectory_data, image_source, episodes, episode_index
+    run_info = merge_episode_info(run_info, load_episode_metadata(episode_dir))
+    return trajectory_data, image_source, episodes, episode_index, run_info
 
 
 def main():
@@ -328,25 +490,25 @@ def main():
     parser.add_argument("--space", choices=["auto", "delta", "absolute"], default="auto")
     parser.add_argument("--position-scale", type=float, default=DEFAULT_POSITION_SCALE)
     parser.add_argument("--position-unit", type=str, default=DEFAULT_POSITION_UNIT)
+    parser.add_argument("--play-interval-ms", type=int, default=DEFAULT_PLAY_INTERVAL_MS)
     parser.add_argument("--no-show", action="store_true", help="Load and render without opening an interactive window")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).expanduser().resolve()
-    trajectory_data, image_source, episodes, episode_index = load_start(data_dir, args.episode)
+    trajectory_data, image_source, episodes, episode_index, run_info = load_start(data_dir, args.episode)
     visualizer = PI05TrajectoryVisualizer(
         trajectory_data,
         image_source,
         data_dir,
         episodes,
         episode_index,
+        run_info,
         space=args.space,
         position_scale=args.position_scale,
         position_unit=args.position_unit,
+        play_interval_ms=args.play_interval_ms,
     )
-    if args.no_show:
-        visualizer.setup()
-        return
-    visualizer.run()
+    visualizer.run(no_show=args.no_show)
 
 
 if __name__ == "__main__":

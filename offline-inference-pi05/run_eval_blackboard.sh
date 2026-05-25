@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+PROJECT_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 if [ -f /home/eai/miniconda3/etc/profile.d/conda.sh ]; then
   # shellcheck disable=SC1091
@@ -12,10 +12,10 @@ fi
 
 export PYTHONPATH="$PROJECT_ROOT/lerobot/src:$PROJECT_ROOT:${PYTHONPATH:-}"
 
-CHECKPOINT=${CHECKPOINT:-$PROJECT_ROOT/ckpt/inference_pi05_45000/pretrained_model}
-DATASET_ROOT=${DATASET_ROOT:-$PROJECT_ROOT/data/lerobot-new-replayed-data}
+CHECKPOINT=${CHECKPOINT:-$PROJECT_ROOT/ckpt/pi05_ckpt/pi05_singlecam_55000/pretrained_model}
+DATASET_ROOT=${DATASET_ROOT:-$PROJECT_ROOT/data/lerobot_blackboard_testdata}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$PROJECT_ROOT/ckpt/inference_pi05_45000/paligemma-3b-pt-224-tokenizer}
-DATASET_REPO_ID=${DATASET_REPO_ID:-local/lerobot-new-replayed-data}
+DATASET_REPO_ID=${DATASET_REPO_ID:-local/lerobot_blackboard_testdata}
 
 cmd=(
   "${PYTHON:-python3}" "$SCRIPT_DIR/eval_lerobot_pi05.py"
@@ -24,6 +24,7 @@ cmd=(
   --dataset-repo-id "$DATASET_REPO_ID"
   --tokenizer-path "$TOKENIZER_PATH"
   --processor-source "${PROCESSOR_SOURCE:-checkpoint}"
+  --cameras "${CAMERAS:-checkpoint}"
   --use-relative-actions
   --relative-action-mode se3_pose
   --pose-arm-offsets "[0]"

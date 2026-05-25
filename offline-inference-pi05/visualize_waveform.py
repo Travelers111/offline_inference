@@ -21,9 +21,10 @@ if "--no-show" in sys.argv or not os.environ.get("DISPLAY"):
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.gridspec import GridSpec
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Button, Slider
 
 from lerobot_frame_source import EpisodeImageSource
+from viz_run_info import load_episode_metadata, load_run_info, merge_episode_info, short_run_title
 
 
 SPACE_KEYS = {
@@ -32,6 +33,8 @@ SPACE_KEYS = {
 }
 DEFAULT_POSITION_SCALE = 10.0
 DEFAULT_POSITION_UNIT = "dm"
+DEFAULT_PLAY_INTERVAL_MS = 40
+KEY_RELEASE_GRACE_MS = 60
 
 
 def available_spaces(trajectory_data: dict) -> list[str]:
@@ -95,9 +98,11 @@ class WaveformVisualizer:
         data_dir: Path | None = None,
         all_episodes: list[str] | None = None,
         current_episode_idx: int = 0,
+        run_info: dict | None = None,
         space: str = "auto",
         position_scale: float = DEFAULT_POSITION_SCALE,
         position_unit: str = DEFAULT_POSITION_UNIT,
+        play_interval_ms: int = DEFAULT_PLAY_INTERVAL_MS,
     ):
         self.pairs = trajectory_data["pairs"]
         self.chunk_size = trajectory_data["chunk_size"]
@@ -112,6 +117,7 @@ class WaveformVisualizer:
         self.data_dir = data_dir
         self.all_episodes = all_episodes or []
         self.current_episode_idx = current_episode_idx
+        self.run_info = run_info or {}
 
         self.dims = {
             "xyz": slice(0, 3),
@@ -129,6 +135,13 @@ class WaveformVisualizer:
         self._vlines = []
         self.image_axes = []
         self._slider_updating = False
+        self.play_interval_ms = play_interval_ms
+        self._playing = False
+        self._play_timer = None
+        self._key_timer = None
+        self._held_direction = 0
+        self._key_release_timer = None
+        self._pending_release_direction = 0
 
     def _build_episode_arrays(self):
         gt = np.zeros((len(self.pairs), self.action_dim), dtype=np.float32)
@@ -146,7 +159,7 @@ class WaveformVisualizer:
         self._build_episode_arrays()
         image_count = len(self.image_source.available_cameras()) if self.image_source is not None else 0
         self.fig = plt.figure(figsize=(17 if image_count else 14, 18))
-        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.93, bottom=0.06, hspace=0.6, wspace=0.14)
+        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.06, hspace=0.6, wspace=0.14)
 
         n_rows = 10
         if image_count:
@@ -187,7 +200,17 @@ class WaveformVisualizer:
             valfmt="%d",
         )
         self.slider.on_changed(self._on_slider_changed)
+        play_ax = self.fig.add_axes([0.92, 0.008, 0.065, 0.035])
+        self.play_button = Button(play_ax, "Play")
+        self.play_button.on_clicked(self.toggle_playback)
+        self._play_timer = self.fig.canvas.new_timer(interval=self.play_interval_ms)
+        self._play_timer.add_callback(self._advance_playback)
+        self._key_timer = self.fig.canvas.new_timer(interval=self.play_interval_ms)
+        self._key_timer.add_callback(self._advance_held_key)
+        self._key_release_timer = self.fig.canvas.new_timer(interval=KEY_RELEASE_GRACE_MS)
+        self._key_release_timer.add_callback(self._finish_key_release)
         self.fig.canvas.mpl_connect("key_press_event", self.on_key_press)
+        self.fig.canvas.mpl_connect("key_release_event", self.on_key_release)
 
         self._draw_background()
         self._draw_chunk_overlay()
@@ -272,13 +295,20 @@ class WaveformVisualizer:
             ep_name = self.all_episodes[self.current_episode_idx]
             ep_info = f"{ep_name} ({self.current_episode_idx + 1}/{len(self.all_episodes)}) | "
         self.fig.suptitle(
+            f"{short_run_title(self.run_info)}\n"
             f"{ep_info}{self.space} | Timestep {timestep}/{self.episode_len - 1}  "
             f"(Pair {self.current_index + 1}/{len(self.pairs)}, chunk={valid}/{self.chunk_size})   "
-            "SPACE/RIGHT: next | LEFT: prev | UP/DOWN: episode | Q: quit",
+            "SPACE/RIGHT: next | LEFT: prev | P/Button: play-pause | UP/DOWN: episode | Q: quit",
             fontsize=10,
         )
 
-    def update_plot(self):
+    def _finish_draw(self, force_draw: bool = False):
+        # Do not call flush_events() from key/timer callbacks. Some GUI
+        # backends recursively process queued key events there during long
+        # holds, which can keep advancing after release.
+        self.fig.canvas.draw_idle()
+
+    def update_plot(self, force_draw: bool = False):
         self._draw_chunk_overlay()
         self._draw_images()
         self._update_title()
@@ -288,37 +318,135 @@ class WaveformVisualizer:
             self.slider.ax.set_xlim(0, self.slider.valmax)
             self.slider.set_val(self.current_index)
             self._slider_updating = False
-        self.fig.canvas.draw_idle()
+        self._finish_draw(force_draw=force_draw)
 
     def _on_slider_changed(self, val):
         if self._slider_updating:
             return
         new_index = int(val)
         if new_index != self.current_index:
+            self.stop_key_hold()
+            self.stop_playback()
             self.current_index = new_index
-            self.update_plot()
+            self.update_plot(force_draw=True)
 
     def on_key_press(self, event):
-        if event.key in (" ", "right"):
-            self.next_pair()
-        elif event.key == "left":
-            self.prev_pair()
+        direction = self._direction_from_key(event.key)
+        if direction:
+            self.stop_playback()
+            self._cancel_pending_key_release()
+            if self._held_direction == direction:
+                return
+            self._held_direction = direction
+            self.step_by(direction, force_draw=True)
+            if self._key_timer is not None:
+                self._key_timer.start()
         elif event.key == "up":
+            self.stop_key_hold()
+            self.stop_playback()
             self.next_episode()
         elif event.key == "down":
+            self.stop_key_hold()
+            self.stop_playback()
             self.prev_episode()
+        elif event.key in ("p", "P"):
+            self.stop_key_hold()
+            self.toggle_playback()
         elif event.key == "q":
+            self.stop_key_hold()
+            self.stop_playback()
             plt.close(self.fig)
 
-    def next_pair(self):
-        if self.current_index < len(self.pairs) - 1:
-            self.current_index += 1
-            self.update_plot()
+    def on_key_release(self, event):
+        direction = self._direction_from_key(event.key)
+        if direction and direction == self._held_direction:
+            self._schedule_key_release(direction)
 
-    def prev_pair(self):
-        if self.current_index > 0:
-            self.current_index -= 1
-            self.update_plot()
+    @staticmethod
+    def _direction_from_key(key) -> int:
+        if key in (" ", "space", "right"):
+            return 1
+        if key == "left":
+            return -1
+        return 0
+
+    def stop_key_hold(self):
+        self._held_direction = 0
+        self._pending_release_direction = 0
+        if self._key_timer is not None:
+            self._key_timer.stop()
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+
+    def _cancel_pending_key_release(self):
+        self._pending_release_direction = 0
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+
+    def _schedule_key_release(self, direction: int):
+        # Tk key auto-repeat can emit release/press pairs while the key is
+        # still physically held. Stop after a short grace window unless another
+        # press for the same direction arrives first.
+        self._pending_release_direction = direction
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+            self._key_release_timer.start()
+
+    def _finish_key_release(self):
+        if self._key_release_timer is not None:
+            self._key_release_timer.stop()
+        if self._pending_release_direction and self._pending_release_direction == self._held_direction:
+            self.stop_key_hold()
+        self._pending_release_direction = 0
+        return True
+
+    def _advance_held_key(self):
+        if not self._held_direction:
+            return True
+        self.step_by(self._held_direction, force_draw=True)
+        return True
+
+    def step_by(self, direction: int, force_draw: bool = False):
+        new_index = int(np.clip(self.current_index + direction, 0, len(self.pairs) - 1))
+        if new_index == self.current_index:
+            return
+        self.current_index = new_index
+        self.update_plot(force_draw=force_draw)
+
+    def next_pair(self, force_draw: bool = False):
+        self.step_by(1, force_draw=force_draw)
+
+    def prev_pair(self, force_draw: bool = False):
+        self.step_by(-1, force_draw=force_draw)
+
+    def toggle_playback(self, _event=None):
+        self.stop_key_hold()
+        if self._playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+
+    def start_playback(self):
+        if self._play_timer is None:
+            return
+        self._playing = True
+        if hasattr(self, "play_button"):
+            self.play_button.label.set_text("Pause")
+        self._play_timer.start()
+
+    def stop_playback(self):
+        self._playing = False
+        if self._play_timer is not None:
+            self._play_timer.stop()
+        if hasattr(self, "play_button"):
+            self.play_button.label.set_text("Play")
+
+    def _advance_playback(self):
+        if not self._playing:
+            return True
+        self.current_index = 0 if self.current_index >= len(self.pairs) - 1 else self.current_index + 1
+        self.update_plot(force_draw=True)
+        return True
 
     def load_episode_data(self, episode_name: str):
         trajectory_path = self.data_dir / episode_name / "trajectory_pairs.pkl"
@@ -331,6 +459,7 @@ class WaveformVisualizer:
             trajectory_data = pickle.load(f)
         episode_dir = self.data_dir / episode_name
         self.image_source = EpisodeImageSource.from_episode_dir(episode_dir, trajectory_data)
+        self.run_info = merge_episode_info(self.run_info, load_episode_metadata(episode_dir))
         self.pairs = trajectory_data["pairs"]
         self.chunk_size = trajectory_data["chunk_size"]
         self.action_dim = trajectory_data["action_dim"]
@@ -351,18 +480,26 @@ class WaveformVisualizer:
             return
         self.current_episode_idx += 1
         if self.load_episode_data(self.all_episodes[self.current_episode_idx]):
-            self.update_plot()
+            self.update_plot(force_draw=True)
 
     def prev_episode(self):
         if not self.all_episodes or self.current_episode_idx <= 0:
             return
         self.current_episode_idx -= 1
         if self.load_episode_data(self.all_episodes[self.current_episode_idx]):
-            self.update_plot()
+            self.update_plot(force_draw=True)
 
-    def run(self):
+    def run(self, no_show: bool = False):
         self.setup_plot()
-        plt.show()
+        try:
+            if no_show:
+                self.fig.canvas.draw()
+                plt.close(self.fig)
+            else:
+                plt.show()
+        finally:
+            self.stop_key_hold()
+            self.stop_playback()
 
 
 def main():
@@ -381,10 +518,12 @@ def main():
     parser.add_argument("--space", choices=["auto", "delta", "absolute"], default="auto")
     parser.add_argument("--position-scale", type=float, default=DEFAULT_POSITION_SCALE)
     parser.add_argument("--position-unit", type=str, default=DEFAULT_POSITION_UNIT)
+    parser.add_argument("--play-interval-ms", type=int, default=DEFAULT_PLAY_INTERVAL_MS)
     parser.add_argument("--no-show", action="store_true", help="Load and render without opening a window")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else Path(__file__).parent / "output"
+    run_info = load_run_info(data_dir)
     all_episodes = sorted(
         d.name for d in data_dir.iterdir() if d.is_dir() and (d / "trajectory_pairs.pkl").exists()
     )
@@ -402,12 +541,13 @@ def main():
     install_numpy_pickle_compat()
     with trajectory_path.open("rb") as f:
         trajectory_data = pickle.load(f)
+    run_info = merge_episode_info(run_info, load_episode_metadata(episode_dir))
 
     print(f"Episode length: {trajectory_data['episode_len']}")
     print(f"Chunk size:     {trajectory_data['chunk_size']}")
     print(f"Action dim:     {trajectory_data['action_dim']}")
     print(f"Pairs:          {len(trajectory_data['pairs'])}")
-    print("\nControls: SPACE/RIGHT=next  LEFT=prev  UP=next episode  DOWN=prev episode  Q=quit")
+    print("\nControls: SPACE/RIGHT=next  LEFT=prev  P/Button=play-pause  UP/DOWN=episode  Q=quit")
 
     image_source = EpisodeImageSource.from_episode_dir(episode_dir, trajectory_data)
     visualizer = WaveformVisualizer(
@@ -416,14 +556,13 @@ def main():
         data_dir=data_dir,
         all_episodes=all_episodes,
         current_episode_idx=current_episode_idx,
+        run_info=run_info,
         space=args.space,
         position_scale=args.position_scale,
         position_unit=args.position_unit,
+        play_interval_ms=args.play_interval_ms,
     )
-    if args.no_show:
-        visualizer.setup_plot()
-        return
-    visualizer.run()
+    visualizer.run(no_show=args.no_show)
 
 
 if __name__ == "__main__":

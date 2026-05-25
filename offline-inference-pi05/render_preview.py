@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from lerobot_frame_source import EpisodeImageSource, camera_strip
+from viz_run_info import load_episode_metadata, load_run_info, merge_episode_info, short_run_title
 
 
 ACTION_LABELS = [
@@ -118,6 +119,7 @@ def render_trajectory(
     data: dict,
     image_source: EpisodeImageSource | None,
     episode_name: str,
+    run_info: dict,
     output_path: Path,
     space: str,
     position_scale: float,
@@ -187,8 +189,8 @@ def render_trajectory(
                 img_ax.text(0.5, 0.5, "No frame", ha="center", va="center")
             img_ax.axis("off")
 
-    fig.suptitle(f"{episode_name}: {space} action chunk previews", fontsize=12)
-    fig.tight_layout()
+    fig.suptitle(f"{short_run_title(run_info)}\n{episode_name}: {space} action chunk previews", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
@@ -204,6 +206,7 @@ def first_step_arrays(data: dict, space: str, position_scale: float) -> tuple[np
 def render_waveform(
     data: dict,
     episode_name: str,
+    run_info: dict,
     output_path: Path,
     space: str,
     position_scale: float,
@@ -228,8 +231,8 @@ def render_waveform(
             ax.legend(loc="upper right")
 
     axes[-1].set_xlabel("timestep")
-    fig.suptitle(f"{episode_name}: first-step {space} GT vs Pred waveforms", fontsize=12)
-    fig.tight_layout()
+    fig.suptitle(f"{short_run_title(run_info)}\n{episode_name}: first-step {space} GT vs Pred waveforms", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
@@ -243,7 +246,11 @@ def episode_dirs(data_dir: Path, episode: str | None) -> list[Path]:
     return episodes
 
 
-def write_index(output_dir: Path, rendered: list[tuple[str, dict[str, tuple[Path, Path]]]]) -> Path:
+def write_index(
+    output_dir: Path,
+    rendered: list[tuple[str, dict[str, tuple[Path, Path]]]],
+    run_info: dict,
+) -> Path:
     rows = []
     for episode, spaces in rendered:
         parts = [f"<h2>{html.escape(episode)}</h2>"]
@@ -265,6 +272,7 @@ def write_index(output_dir: Path, rendered: list[tuple[str, dict[str, tuple[Path
         "<title>pi0.5 offline inference preview</title></head>"
         "<body style='font-family:sans-serif; margin:24px;'>"
         "<h1>pi0.5 offline inference preview</h1>"
+        f"<p><strong>{html.escape(short_run_title(run_info))}</strong></p>"
         + "\n".join(rows)
         + "</body></html>\n"
     )
@@ -284,10 +292,12 @@ def main():
     data_dir = Path(args.data_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else data_dir / "preview"
     output_dir.mkdir(parents=True, exist_ok=True)
+    base_run_info = load_run_info(data_dir)
 
     rendered = []
     for episode_dir in episode_dirs(data_dir, args.episode):
         data = load_trajectory(episode_dir / "trajectory_pairs.pkl")
+        run_info = merge_episode_info(base_run_info, load_episode_metadata(episode_dir))
         image_source = EpisodeImageSource.from_episode_dir(episode_dir, data)
         if args.space == "all":
             spaces = available_spaces(data)
@@ -305,6 +315,7 @@ def main():
                 data,
                 image_source,
                 episode_dir.name,
+                run_info,
                 traj_path,
                 space=space,
                 position_scale=args.position_scale,
@@ -313,6 +324,7 @@ def main():
             render_waveform(
                 data,
                 episode_dir.name,
+                run_info,
                 wave_path,
                 space=space,
                 position_scale=args.position_scale,
@@ -323,7 +335,7 @@ def main():
             print(f"  {wave_path}")
         rendered.append((episode_dir.name, rendered_spaces))
 
-    index = write_index(output_dir, rendered)
+    index = write_index(output_dir, rendered, base_run_info)
     print(f"Index: {index}")
 
 

@@ -361,14 +361,35 @@ observation.images.cam_top
 dataset_to_policy_features(dataset.meta.features)
 ```
 
-从目标 dataset 重新推断：
+从目标 dataset 重新推断 state/action features：
 
 ```text
 cfg.input_features
 cfg.output_features
 ```
 
-这样 policy 的视觉输入 key、state shape 和 action shape 都与当前数据一致。
+视觉输入不会无条件使用 dataset 的全部相机，而是先解析 `--cameras`。
+当前默认是：
+
+```bash
+--cameras checkpoint
+```
+
+脚本会从 checkpoint 的 `config.json -> input_features` 读取模型实际训练时的视觉输入：
+
+```text
+双相机 pi0.5: observation.images.cam_hand + observation.images.cam_top
+单相机 pi0.5: observation.images.cam_hand
+```
+
+然后只把这些相机写回 `cfg.input_features`。这样一个单相机 checkpoint 即使评估在仍然保存了 `cam_top` 的双相机数据集上，也只会消费 `cam_hand`，不会把未训练过的第二路相机加入模型输入。需要强制改相机时可以传：
+
+```bash
+--cameras cam_hand
+--cameras all
+```
+
+这样 policy 的视觉输入 key、state shape 和 action shape 都与当前 checkpoint 和数据一致。
 
 ## 5. processor 构建逻辑
 
@@ -864,14 +885,17 @@ python offline-inference-pi05/visualize_episode.py \
 每个 chunk 默认 50 步。键盘控制：
 
 ```text
-Right / Space: 下一个 timestep
-Left: 上一个 timestep
+长按 Right / Space: 连续向前播放 timestep
+长按 Left: 连续回退 timestep
+P / Play 按钮: 自动播放 / 暂停
 Up: 下一个 episode
 Down: 上一个 episode
 Q: 退出
 ```
 
-如果推理时保存了 `images.pkl`，右侧会显示对应相机帧。默认我们没有保存图像，所以只显示轨迹。
+`visualize_episode.py` 在每次重绘 3D 轨迹前会读取当前 Matplotlib 3D 轴的 `elev/azim/roll`，重绘后再恢复这个视角。因此用户用鼠标旋转到任意角度后，继续按键或长按播放时不会被强制归位。
+
+右侧图像与当前 timestep 同步刷新。图像来源优先是输出目录中的 `images.pkl`；如果没有保存 `images.pkl`，可视化脚本会根据 `source_dataset_root` 和 `dataset_from_index` 回到原始 LeRobot dataset 按需解码当前帧。
 
 ### 11.2 交互式波形可视化
 
@@ -898,6 +922,17 @@ x, y, z, rot0, rot1, rot2, rot3, rot4, rot5, gripper
 ```
 
 这个视图适合看某个维度是否整体偏移、抖动、发散，尤其适合检查 gripper 和 xyz。
+
+波形图也使用同一套键盘长按 timer：
+
+```text
+长按 Right / Space: 当前 chunk 和右侧图像连续前进
+长按 Left: 当前 chunk 和右侧图像连续回退
+P / Play 按钮: 自动播放 / 暂停
+松开方向键: 停止 key timer
+```
+
+实现上不依赖操作系统的重复 keypress，而是使用 Matplotlib timer；松手时通过一个短 `release grace timer` 过滤 Tk 后端的自动重复抖动，避免松手后继续补播放。
 
 ### 11.3 静态 PNG/HTML 预览
 

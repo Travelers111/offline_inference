@@ -12,7 +12,17 @@ from typing import Any
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def find_project_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "lerobot" / "src").exists():
+            return candidate
+    return start.parents[1]
+
+
+PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 LEROBOT_SRC = PROJECT_ROOT / "lerobot" / "src"
 if str(LEROBOT_SRC) not in sys.path:
     sys.path.insert(0, str(LEROBOT_SRC))

@@ -26,7 +26,17 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def find_project_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "lerobot" / "src").exists():
+            return candidate
+    return start.parents[1]
+
+
+PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 LEROBOT_SRC = PROJECT_ROOT / "lerobot" / "src"
 if str(LEROBOT_SRC) not in sys.path:
     sys.path.insert(0, str(LEROBOT_SRC))
@@ -39,9 +49,6 @@ from lerobot.policies import make_policy, make_pre_post_processors  # noqa: E402
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE  # noqa: E402
 from lerobot.utils.feature_utils import dataset_to_policy_features  # noqa: E402
 from lerobot.utils.pose6d import state_action_to_relative_pose_action_np  # noqa: E402
-
-
-SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET_ROOT = PROJECT_ROOT / "data" / "lerobot_blackboard_testdata"
 DEFAULT_CHECKPOINT = PROJECT_ROOT / "ckpt" / "inference_pi05_45000" / "pretrained_model"
 DEFAULT_TOKENIZER = PROJECT_ROOT / "ckpt" / "inference_pi05_45000" / "paligemma-3b-pt-224-tokenizer"
@@ -154,7 +161,71 @@ def checkpoint_has_usable_processors(model_dir: Path, use_relative_actions: bool
     )
 
 
-def build_pi05_config(args: argparse.Namespace, model_dir: Path, dataset: LeRobotDataset):
+def get_checkpoint_image_keys(model_dir: Path) -> list[str]:
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        return []
+
+    data = json.loads(config_path.read_text())
+    input_features = data.get("input_features") or {}
+    image_keys = []
+    for key, spec in input_features.items():
+        feature_type = spec.get("type") if isinstance(spec, dict) else None
+        if feature_type == "VISUAL" or key.startswith(f"{OBS_IMAGES}."):
+            image_keys.append(key)
+    return sorted(image_keys)
+
+
+def normalize_camera_key(name: str) -> str:
+    name = name.strip()
+    if name.startswith(f"{OBS_IMAGES}."):
+        return name
+    return f"{OBS_IMAGES}.{name}"
+
+
+def get_image_keys(
+    dataset: LeRobotDataset,
+    requested: str | None,
+    checkpoint_keys: list[str],
+) -> tuple[list[str], str]:
+    available = sorted(key for key in dataset.meta.features if key.startswith(f"{OBS_IMAGES}."))
+    available_set = set(available)
+    request = (requested or "checkpoint").strip().lower()
+
+    if request in {"", "auto", "checkpoint"}:
+        if checkpoint_keys:
+            missing = [key for key in checkpoint_keys if key not in available_set]
+            if missing:
+                raise KeyError(
+                    "Checkpoint expects camera(s) missing from the dataset: "
+                    f"{missing}. Available dataset cameras: {available}"
+                )
+            return sorted(checkpoint_keys), "checkpoint"
+        return available, "dataset"
+
+    if request in {"all", "dataset"}:
+        return available, "dataset"
+
+    image_keys = []
+    for name in requested.split(","):
+        if not name.strip():
+            continue
+        key = normalize_camera_key(name)
+        if key not in available_set:
+            raise KeyError(f"Requested camera {key} not found. Available: {available}")
+        if key not in image_keys:
+            image_keys.append(key)
+    if not image_keys:
+        raise ValueError("No cameras selected.")
+    return image_keys, "explicit"
+
+
+def build_pi05_config(
+    args: argparse.Namespace,
+    model_dir: Path,
+    dataset: LeRobotDataset,
+    image_keys: list[str],
+):
     cfg = PreTrainedConfig.from_pretrained(model_dir)
     if cfg.type != "pi05":
         raise ValueError(f"Expected a pi05 checkpoint, got policy type: {cfg.type}")
@@ -184,10 +255,23 @@ def build_pi05_config(args: argparse.Namespace, model_dir: Path, dataset: LeRobo
     cfg.gradient_checkpointing = False
     cfg.compile_model = False
 
-    # Re-infer cameras/state/action from the target LeRobot dataset. This is the
-    # same shape source used by training when loading pi05_base for fine-tuning.
+    # Re-infer state/action from the target LeRobot dataset, but keep visual
+    # inputs limited to the resolved camera set. This lets a single-camera
+    # checkpoint run on a dataset that still contains the unused second camera.
     features = dataset_to_policy_features(dataset.meta.features)
-    cfg.input_features = {key: ft for key, ft in features.items() if ft.type is not FeatureType.ACTION}
+    missing_image_features = [key for key in image_keys if key not in features]
+    if missing_image_features:
+        raise KeyError(f"Selected camera feature(s) missing from policy features: {missing_image_features}")
+
+    input_features = {key: features[key] for key in image_keys}
+    for key, ft in features.items():
+        if ft.type is FeatureType.ACTION:
+            continue
+        if key.startswith(f"{OBS_IMAGES}."):
+            continue
+        input_features[key] = ft
+
+    cfg.input_features = input_features
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
 
     action_names = dataset.meta.features.get(ACTION, {}).get("names")
@@ -232,24 +316,6 @@ def build_processors(args: argparse.Namespace, cfg, model_dir: Path, dataset: Le
         )
 
     return preprocessor, postprocessor, resolved_source
-
-
-def get_image_keys(dataset: LeRobotDataset, requested: str | None) -> list[str]:
-    available = [key for key in dataset.meta.features if key.startswith(f"{OBS_IMAGES}.")]
-    if requested is None or requested.strip().lower() in {"", "all"}:
-        return sorted(available)
-
-    image_keys = []
-    for name in requested.split(","):
-        name = name.strip()
-        if not name:
-            continue
-        key = name if name.startswith(f"{OBS_IMAGES}.") else f"{OBS_IMAGES}.{name}"
-        if key not in available:
-            raise KeyError(f"Requested camera {key} not found. Available: {available}")
-        image_keys.append(key)
-    return image_keys
-
 
 def episode_rows(dataset: LeRobotDataset, episode_index: int) -> tuple[int, int, int]:
     ep = dataset.meta.episodes[episode_index]
@@ -575,9 +641,11 @@ def evaluate_episode(
         "episode_name": episode_name,
         "episode_index": episode_index,
         "episode_len": episode_len,
+        "checkpoint": str(args.resolved_model_dir),
         "task": args.task or (unique_tasks[0] if len(unique_tasks) == 1 else unique_tasks),
         "dataset_tasks": unique_tasks,
         "cameras": image_keys,
+        "camera_source": getattr(args, "resolved_camera_source", "unknown"),
         "chunk_size": chunk_size,
         "state_dim": int(states.shape[-1]),
         "action_dim": action_dim,
@@ -616,6 +684,8 @@ def write_summary(output_dir: Path, args: argparse.Namespace, episode_metrics: l
         "dataset_root": str(Path(args.dataset_root).expanduser().resolve()),
         "output_dir": str(Path(args.output_dir).expanduser().resolve()),
         "processor_source": args.resolved_processor_source,
+        "cameras": getattr(args, "resolved_cameras", []),
+        "camera_source": getattr(args, "resolved_camera_source", "unknown"),
         "action_mode": action_mode,
         "state_mode": "absolute",
         "primary_metric_space": primary_metric_space,
@@ -690,6 +760,7 @@ def write_summary(output_dir: Path, args: argparse.Namespace, episode_metrics: l
         f"Dataset root: {summary['dataset_root']}",
         f"Output dir: {summary['output_dir']}",
         f"Processor source: {summary['processor_source']}",
+        f"Cameras: {summary['cameras']} ({summary['camera_source']})",
         f"Action mode: {summary['action_mode']}",
         f"State mode: {summary['state_mode']}",
         f"Metric drop last frames: {summary['metric_drop_last_frames']}",
@@ -748,8 +819,11 @@ def main(args: argparse.Namespace) -> None:
         list_episodes(dataset)
         return
 
-    image_keys = get_image_keys(dataset, args.cameras)
-    cfg = build_pi05_config(args, model_dir, dataset)
+    checkpoint_cameras = get_checkpoint_image_keys(model_dir)
+    image_keys, camera_source = get_image_keys(dataset, args.cameras, checkpoint_cameras)
+    args.resolved_cameras = image_keys
+    args.resolved_camera_source = camera_source
+    cfg = build_pi05_config(args, model_dir, dataset, image_keys)
     args.pose_arm_offsets = list(getattr(cfg, "pose_arm_offsets", [0]))
     args.pose_arm_stride = int(getattr(cfg, "pose_arm_stride", 10))
     args.resolved_action_mode = resolve_action_mode(cfg)
@@ -762,7 +836,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"Dataset: {dataset.root}")
     print(f"Output dir: {args.output_dir}")
     print(f"Device/dtype: {cfg.device}/{cfg.dtype}")
-    print(f"Cameras: {image_keys}")
+    print(f"Cameras: {image_keys} ({camera_source})")
     print(f"State mode: absolute")
     print(f"Action mode: {args.resolved_action_mode}")
     print(f"Relative actions: {cfg.use_relative_actions} ({cfg.relative_action_mode})")
@@ -828,7 +902,15 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--task", type=str, default=None, help="Override task prompt for every frame")
-    parser.add_argument("--cameras", type=str, default="all", help="Comma-separated camera names or 'all'")
+    parser.add_argument(
+        "--cameras",
+        type=str,
+        default="checkpoint",
+        help=(
+            "Camera selection: 'checkpoint'/'auto' uses checkpoint visual inputs, "
+            "'all'/'dataset' uses all dataset cameras, or pass comma-separated names."
+        ),
+    )
     parser.add_argument("--device", type=str, default="auto", help="auto, cuda, cuda:0, or cpu")
     parser.add_argument("--dtype", type=str, default="auto", choices=["auto", "bfloat16", "float32"])
     parser.add_argument("--video-backend", type=str, default="pyav")
